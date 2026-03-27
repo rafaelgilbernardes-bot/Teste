@@ -35,9 +35,13 @@ def _extract_custom_fields(task: dict) -> dict[str, str | None]:
             options = cf.get("type_config", {}).get("options", [])
             if val is not None and options:
                 try:
-                    idx = int(val)
+                    # val can be int, string, or list (multi-select dropdown)
+                    if isinstance(val, list):
+                        idx = int(val[0]) if val else 0
+                    else:
+                        idx = int(val)
                     result[name] = options[idx]["name"]
-                except (ValueError, IndexError, KeyError):
+                except (ValueError, IndexError, KeyError, TypeError):
                     result[name] = str(val)
             elif val is not None:
                 result[name] = str(val)
