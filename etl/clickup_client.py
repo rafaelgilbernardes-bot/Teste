@@ -1,10 +1,4 @@
-"""Cliente HTTP para a API v2 do ClickUp.
-
-Padres críticos documentados no briefing:
-- Time entries sempre consultados pela tarefa-mãe, nunca pela subtarefa.
-- Não usar endpoint /team/{id}/time_entries com assignee.
-- Paginação cursor-based em search_tasks.
-"""
+"""Cliente HTTP para a API v2 do ClickUp."""
 from __future__ import annotations
 
 import os
@@ -17,8 +11,11 @@ import requests
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.clickup.com/api/v2"
-_MAX_RETRIES = 4
-_BACKOFF = [2, 4, 8, 16]  # segundos
+_BACKOFF = [2, 4, 8, 16]
+
+# ID fixo do workspace CFPazziniGil
+# Obtido via API: workspace 'CF Consultoria' / ID 36970566
+CFPAZZINIGIL_TEAM_ID = "36970566"
 
 
 class ClickUpClient:
@@ -26,10 +23,6 @@ class ClickUpClient:
         self.token = token or os.environ["CLICKUP_API_TOKEN"]
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.token})
-
-    # ------------------------------------------------------------------
-    # Helpers internos
-    # ------------------------------------------------------------------
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         url = f"{BASE_URL}{path}"
@@ -48,51 +41,61 @@ class ClickUpClient:
             except requests.RequestException as exc:
                 if attempt == len(_BACKOFF):
                     raise
-                log.warning("Tentativa %d falhou (%s). Retry em %ds", attempt + 1, exc, _BACKOFF[attempt])
-        raise RuntimeError(f"Falha após {_MAX_RETRIES} tentativas: {url}")
+                log.warning("Tentativa %d falhou (%s). Retry em %ds",
+                            attempt + 1, exc, _BACKOFF[attempt])
+        raise RuntimeError(f"Falha após {len(_BACKOFF)} tentativas: {url}")
 
-    # ------------------------------------------------------------------
-    # Hierarquia
-    # ------------------------------------------------------------------
+    def get_team_id(self) -> str:
+        """Retorna o ID do workspace CFPazziniGil.
 
-    def get_workspace_hierarchy(self) -> list[dict]:
-        """Retorna spaces com folders e lists aninhados (max_depth=2)."""
-        data = self._get("/team")
-        teams = data.get("teams", [])
-        if not teams:
-            return []
-        team_id = teams[0]["id"]
+        Usa a variável de ambiente CLICKUP_TEAM_ID se definida,
+        caso contrário usa o ID fixo do workspace CF Consultoria.
+        """
+        return os.environ.get("CLICKUP_TEAM_ID") or CFPAZZINIGIL_TEAM_ID
 
-        spaces_data = self._get(f"/team/{team_id}/space", {"archived": "false"})
+    def get_all_lists(self, team_id: str) -> list[dict]:
+        """Retorna lista plana de todas as lists do workspace."""
+        spaces_data = self._get(
+            f"/team/{team_id}/space", {"archived": "false"}
+        )
         spaces = spaces_data.get("spaces", [])
+        log.info("%d spaces encontrados: %s",
+                 len(spaces), [s["name"] for s in spaces])
 
-        hierarchy = []
+        all_lists: list[dict] = []
         for space in spaces:
             space_id = space["id"]
-            folders_data = self._get(f"/space/{space_id}/folder", {"archived": "false"})
-            folders = folders_data.get("folders", [])
+            space_name = space["name"]
 
-            enriched_folders = []
-            for folder in folders:
+            folders_data = self._get(
+                f"/space/{space_id}/folder", {"archived": "false"}
+            )
+            for folder in folders_data.get("folders", []):
                 folder_id = folder["id"]
-                lists_data = self._get(f"/folder/{folder_id}/list", {"archived": "false"})
-                folder["lists"] = lists_data.get("lists", [])
-                enriched_folders.append(folder)
+                lists_data = self._get(
+                    f"/folder/{folder_id}/list", {"archived": "false"}
+                )
+                for lst in lists_data.get("lists", []):
+                    all_lists.append({
+                        "list_id": lst["id"],
+                        "list_name": lst["name"],
+                        "space_name": space_name,
+                    })
 
-            # Lists direto no space (sem folder)
-            spacelists_data = self._get(f"/space/{space_id}/list", {"archived": "false"})
-            space["folders"] = enriched_folders
-            space["direct_lists"] = spacelists_data.get("lists", [])
-            hierarchy.append(space)
+            # Lists sem folder
+            fl_data = self._get(
+                f"/space/{space_id}/list", {"archived": "false"}
+            )
+            for lst in fl_data.get("lists", []):
+                all_lists.append({
+                    "list_id": lst["id"],
+                    "list_name": lst["name"],
+                    "space_name": space_name,
+                })
 
-        return hierarchy
-
-    # ------------------------------------------------------------------
-    # Tarefas
-    # ------------------------------------------------------------------
+        return all_lists
 
     def get_tasks_in_list(self, list_id: str) -> list[dict]:
-        """Busca todas as tarefas de uma lista com paginação."""
         tasks: list[dict] = []
         page = 0
         while True:
@@ -101,7 +104,7 @@ class ClickUpClient:
                 {
                     "archived": "false",
                     "include_closed": "true",
-                    "subtasks": "false",   # apenas tarefas-mãe
+                    "subtasks": "false",
                     "page": page,
                 },
             )
@@ -112,45 +115,24 @@ class ClickUpClient:
             page += 1
         return tasks
 
-    def get_task(self, task_id: str) -> dict:
-        """Detalhes de uma tarefa (custom fields, assignees, time_spent)."""
-        return self._get(f"/task/{task_id}", {"custom_task_ids": "false", "include_subtasks": "false"})
-
-    # ------------------------------------------------------------------
-    # Time Entries
-    # ------------------------------------------------------------------
-
     def get_time_entries(
         self,
         task_id: str,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> list[dict]:
-        """Time entries de uma tarefa-mãe (inclui entries de subtarefas).
-
-        Datas no formato 'YYYY-MM-DD'. A API espera Unix ms.
-        IMPORTANTE: Consultar sempre pela tarefa-mãe — IDs de subtarefas
-        podem retornar erro.
-        """
         params: dict = {}
         if start_date:
             params["start_date"] = _to_unix_ms(start_date)
         if end_date:
             params["end_date"] = _to_unix_ms(end_date, end_of_day=True)
-
         data = self._get(f"/task/{task_id}/time", params)
         return data.get("data", [])
 
 
-# ------------------------------------------------------------------
-# Utilitários
-# ------------------------------------------------------------------
-
 def _to_unix_ms(date_str: str, end_of_day: bool = False) -> int:
-    """Converte 'YYYY-MM-DD' para Unix timestamp em milissegundos."""
     from datetime import datetime, timezone
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     if end_of_day:
         dt = dt.replace(hour=23, minute=59, second=59)
-    dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
