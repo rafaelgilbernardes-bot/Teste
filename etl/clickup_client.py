@@ -13,10 +13,6 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://api.clickup.com/api/v2"
 _BACKOFF = [2, 4, 8, 16]
 
-# ID fixo do workspace CFPazziniGil
-# Obtido via API: workspace 'CF Consultoria' / ID 36970566
-CFPAZZINIGIL_TEAM_ID = "36970566"
-
 
 class ClickUpClient:
     def __init__(self, token: str | None = None):
@@ -46,12 +42,45 @@ class ClickUpClient:
         raise RuntimeError(f"Falha após {len(_BACKOFF)} tentativas: {url}")
 
     def get_team_id(self) -> str:
-        """Retorna o ID do workspace CFPazziniGil.
+        """Detecta o workspace correto.
 
-        Usa a variável de ambiente CLICKUP_TEAM_ID se definida,
-        caso contrário usa o ID fixo do workspace CF Consultoria.
+        Se CLICKUP_TEAM_ID estiver definido, usa ele.
+        Caso contrário, lista todos os workspaces do token e usa o que
+        tiver um space chamado 'Consultivo' (padrão CFPazziniGil).
+        Se não encontrar, usa o primeiro da lista.
         """
-        return os.environ.get("CLICKUP_TEAM_ID") or CFPAZZINIGIL_TEAM_ID
+        if team_id_env := os.environ.get("CLICKUP_TEAM_ID"):
+            log.info("Usando CLICKUP_TEAM_ID do ambiente: %s", team_id_env)
+            return team_id_env
+
+        data = self._get("/team")
+        teams = data.get("teams", [])
+        if not teams:
+            raise ValueError("Nenhum workspace encontrado para este token")
+
+        log.info("Workspaces acessíveis com este token:")
+        for t in teams:
+            log.info("  - %s (ID: %s)", t.get("name", "?"), t["id"])
+
+        # Procura o workspace que tem space 'Consultivo'
+        for team in teams:
+            try:
+                spaces = self._get(
+                    f"/team/{team['id']}/space", {"archived": "false"}
+                ).get("spaces", [])
+                space_names = [s["name"] for s in spaces]
+                log.info("  Workspace '%s' tem spaces: %s",
+                         team.get("name"), space_names)
+                if "Consultivo" in space_names:
+                    log.info("  >>> Workspace correto encontrado: %s (ID: %s)",
+                             team.get("name"), team["id"])
+                    return str(team["id"])
+            except Exception as e:
+                log.warning("  Não foi possível acessar workspace %s: %s",
+                            team["id"], e)
+
+        log.warning("Workspace com 'Consultivo' não encontrado. Usando o primeiro.")
+        return str(teams[0]["id"])
 
     def get_all_lists(self, team_id: str) -> list[dict]:
         """Retorna lista plana de todas as lists do workspace."""
@@ -71,6 +100,9 @@ class ClickUpClient:
                 f"/space/{space_id}/folder", {"archived": "false"}
             )
             for folder in folders_data.get("folders", []):
+                # Pular pastas internas
+                if folder.get("name", "") == "Interno":
+                    continue
                 folder_id = folder["id"]
                 lists_data = self._get(
                     f"/folder/{folder_id}/list", {"archived": "false"}
