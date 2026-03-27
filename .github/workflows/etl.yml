@@ -1,0 +1,59 @@
+name: ETL ClickUp → Supabase
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # diáriamente às 06h00 UTC (03h00 BRT)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Número de dias passados a reprocessar'
+        required: false
+        default: '2'
+      start_date:
+        description: 'Data de início manual (YYYY-MM-DD, opcional)'
+        required: false
+      end_date:
+        description: 'Data de fim manual (YYYY-MM-DD, opcional)'
+        required: false
+
+jobs:
+  etl:
+    name: Extrair ClickUp e gravar Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: etl/requirements.txt
+
+      - name: Instalar dependências
+        run: pip install -r etl/requirements.txt
+
+      - name: Executar ETL (datas manuais)
+        if: ${{ github.event.inputs.start_date != '' && github.event.inputs.end_date != '' }}
+        working-directory: etl
+        run: |
+          python run.py \
+            --start "${{ github.event.inputs.start_date }}" \
+            --end   "${{ github.event.inputs.end_date }}"
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+      - name: Executar ETL (N dias passados)
+        if: ${{ github.event.inputs.start_date == '' || github.event.inputs.end_date == '' }}
+        working-directory: etl
+        run: |
+          python run.py --days "${{ github.event.inputs.days || '2' }}"
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
