@@ -82,84 +82,34 @@ class ClickUpClient:
         log.warning("Workspace com 'Consultivo' não encontrado. Usando o primeiro.")
         return str(teams[0]["id"])
 
-    def get_all_lists(self, team_id: str) -> list[dict]:
-        """Retorna lista plana de todas as lists do workspace."""
-        spaces_data = self._get(
-            f"/team/{team_id}/space", {"archived": "false"}
-        )
-        spaces = spaces_data.get("spaces", [])
-        log.info("%d spaces encontrados: %s",
-                 len(spaces), [s["name"] for s in spaces])
+    def get_workspace_time_entries(
+        self, team_id: str, start_date: str, end_date: str
+    ) -> list[dict]:
+        """Busca TODAS as time entries do workspace em um intervalo de datas.
 
-        all_lists: list[dict] = []
-        for space in spaces:
-            space_id = space["id"]
-            space_name = space["name"]
-
-            folders_data = self._get(
-                f"/space/{space_id}/folder", {"archived": "false"}
-            )
-            for folder in folders_data.get("folders", []):
-                # Pular pastas internas
-                if folder.get("name", "") == "Interno":
-                    continue
-                folder_id = folder["id"]
-                lists_data = self._get(
-                    f"/folder/{folder_id}/list", {"archived": "false"}
-                )
-                for lst in lists_data.get("lists", []):
-                    all_lists.append({
-                        "list_id": lst["id"],
-                        "list_name": lst["name"],
-                        "space_name": space_name,
-                    })
-
-            # Lists sem folder
-            fl_data = self._get(
-                f"/space/{space_id}/list", {"archived": "false"}
-            )
-            for lst in fl_data.get("lists", []):
-                all_lists.append({
-                    "list_id": lst["id"],
-                    "list_name": lst["name"],
-                    "space_name": space_name,
-                })
-
-        return all_lists
-
-    def get_tasks_in_list(self, list_id: str) -> list[dict]:
-        tasks: list[dict] = []
+        Mais eficiente que buscar por tarefa: uma chamada por página.
+        Retorna no máximo 100 entries por página — pagina automaticamente.
+        """
+        params: dict = {
+            "start_date": _to_unix_ms(start_date),
+            "end_date": _to_unix_ms(end_date, end_of_day=True),
+        }
+        all_entries: list[dict] = []
         page = 0
         while True:
-            data = self._get(
-                f"/list/{list_id}/task",
-                {
-                    "archived": "false",
-                    "include_closed": "true",
-                    "subtasks": "false",
-                    "page": page,
-                },
-            )
-            batch = data.get("tasks", [])
-            tasks.extend(batch)
-            if len(batch) < 100 or data.get("last_page"):
+            params["page"] = page
+            data = self._get(f"/team/{team_id}/time_entries", params)
+            batch = data.get("data", [])
+            all_entries.extend(batch)
+            log.info("  Página %d: %d entries", page, len(batch))
+            if len(batch) < 100:
                 break
             page += 1
-        return tasks
+        return all_entries
 
-    def get_time_entries(
-        self,
-        task_id: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> list[dict]:
-        params: dict = {}
-        if start_date:
-            params["start_date"] = _to_unix_ms(start_date)
-        if end_date:
-            params["end_date"] = _to_unix_ms(end_date, end_of_day=True)
-        data = self._get(f"/task/{task_id}/time", params)
-        return data.get("data", [])
+    def get_task(self, task_id: str) -> dict:
+        """Busca detalhes de uma tarefa incluindo custom fields e list."""
+        return self._get(f"/task/{task_id}")
 
 
 def _to_unix_ms(date_str: str, end_of_day: bool = False) -> int:
