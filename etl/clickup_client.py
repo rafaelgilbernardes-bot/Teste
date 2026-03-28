@@ -114,6 +114,7 @@ class ClickUpClient:
 
 def _to_unix_ms(date_str: str, end_of_day: bool = False) -> int:
     from datetime import datetime, timezone
+    date_str = date_str.replace("/", "-")
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     if end_of_day:
         dt = dt.replace(hour=23, minute=59, second=59)
